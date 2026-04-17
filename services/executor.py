@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import shlex
+import sys
 
 
 class LocalExecutor:
@@ -18,13 +19,21 @@ class LocalExecutor:
         return candidate
 
     async def run_command(self, command: str) -> str:
-        args = shlex.split(command)
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=str(self.allowed_root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        if sys.platform == "win32":
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(self.allowed_root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            args = shlex.split(command)
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(self.allowed_root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_seconds)

@@ -15,13 +15,16 @@ class Settings(BaseSettings):
     telegram_chat_id: int
     telegram_webhook_secret: str = ""
 
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4.1-mini"
+    max_agent_turns: int = 50
 
-    allowed_root: str = "."
-    command_timeout_seconds: int = 20
-    max_output_chars: int = 3500
-    allowed_commands: str = "ls,pwd,whoami,python,python3,cat,head,tail,echo,date,uname"
+    # Working directory for Claude – defaults to home dir (system-wide access)
+    allowed_root: str = "~"
+    command_timeout_seconds: int = 120
+    max_output_chars: int = 50_000
+    allowed_commands: str = "ls,pwd,whoami,python,python3,cat,head,tail,echo,date,uname,dir,type,where"
+
+    # Telegram message length before converting to PDF
+    pdf_threshold: int = 3800
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

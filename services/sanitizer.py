@@ -13,6 +13,11 @@ DANGEROUS_TOKENS = {
     "dd",
     "chmod",
     "chown",
+    # Windows equivalents
+    "del",
+    "rmdir",
+    "rd",
+    "format",
 }
 
 
