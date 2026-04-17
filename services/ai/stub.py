@@ -1,46 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from services.ai.base import AICoder, ProposedChange
+from services.ai.base import AgentDecision, NLUAdapter
 
 
-class StubAICoder(AICoder):
-    """Deterministic AI behavior for MVP development/testing."""
+class HeuristicNLUAdapter(NLUAdapter):
+    async def decide(self, text: str) -> AgentDecision:
+        lowered = text.strip().lower()
 
-    async def propose_changes(self, prompt: str, repo_root: str) -> ProposedChange:
-        normalized = prompt.lower()
-        files: dict[str, str] = {}
+        if lowered.startswith("run "):
+            return AgentDecision(action="shell", argument=text[4:].strip())
 
-        if "health" in normalized and "fastapi" in normalized:
-            app_file = self._find_fastapi_app(repo_root) or "main.py"
-            existing = Path(repo_root, app_file).read_text() if Path(repo_root, app_file).exists() else ""
-            snippet = "\n\n@app.get(\"/health\")\ndef health() -> dict[str, str]:\n    return {\"status\": \"ok\"}\n"
-            if "@app.get(\"/health\")" not in existing:
-                files[app_file] = existing.rstrip() + snippet + "\n"
-                summary = "Added /health endpoint to FastAPI app"
-            else:
-                summary = "Health endpoint already exists"
-        else:
-            readme = Path(repo_root, "README.md")
-            content = readme.read_text() if readme.exists() else "# Repository\n"
-            content += f"\n\n## Assistant Note\n- Request: {prompt}\n"
-            files["README.md"] = content
-            summary = "Added assistant note to README as placeholder change"
+        if lowered.startswith("list"):
+            argument = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else "."
+            return AgentDecision(action="list_dir", argument=argument)
 
-        return ProposedChange(summary=summary, files=files)
+        if lowered.startswith("read "):
+            return AgentDecision(action="read_file", argument=text[5:].strip())
 
-    async def explain(self, prompt: str, repo_root: str) -> str:
-        return (
-            "I will analyze the repository, propose safe file changes, and produce a diff. "
-            f"Prompt interpreted as: '{prompt}'."
-        )
+        if lowered.startswith("write ") and ":::" in text:
+            return AgentDecision(action="write_file", argument=text[6:].strip())
 
-    @staticmethod
-    def _find_fastapi_app(repo_root: str) -> str | None:
-        candidates = ["main.py", "app/main.py", "src/main.py"]
-        for candidate in candidates:
-            p = Path(repo_root, candidate)
-            if p.exists() and "FastAPI" in p.read_text(errors="ignore"):
-                return candidate
-        return None
+        return AgentDecision(action="respond", argument=f"I received: {text}")
