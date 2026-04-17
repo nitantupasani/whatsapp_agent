@@ -4,14 +4,11 @@ from dataclasses import dataclass
 
 
 @dataclass
-class ProposedChange:
-    summary: str
-    files: dict[str, str]
+class AgentDecision:
+    action: str
+    argument: str
 
 
-class AICoder:
-    async def propose_changes(self, prompt: str, repo_root: str) -> ProposedChange:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    async def explain(self, prompt: str, repo_root: str) -> str:  # pragma: no cover - interface
+class NLUAdapter:
+    async def decide(self, text: str) -> AgentDecision:  # pragma: no cover - interface
         raise NotImplementedError

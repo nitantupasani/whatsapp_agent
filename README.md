@@ -1,332 +1,235 @@
-# WhatsApp Code Assistant (MVP)
+# Telegram Laptop Agent (FastAPI + Local Execution)
 
-A modular system that converts WhatsApp messages into safe coding tasks against isolated Git workspaces.
+Control your laptop from Telegram (phone/iPad) with a secure webhook-based bot.
 
----
-
-## 1) Architecture Diagram (Text)
+Architecture:
 
 ```text
-+------------------------+        +-----------------------------+
-| WhatsApp Cloud API     | -----> | /backend FastAPI Webhook    |
-| (incoming webhook)     |        | - verify token handler      |
-+------------------------+        | - message intake            |
-                                  +-------------+---------------+
-                                                |
-                                                v
-                                  +-----------------------------+
-                                  | Task Queue / State          |
-                                  | - Redis conversation state  |
-                                  | - Async in-process queue    |
-                                  +-------------+---------------+
-                                                |
-                                                v
-                                  +-----------------------------+
-                                  | /runner Local Agent         |
-                                  | - repo workspace isolation  |
-                                  | - git branch per session    |
-                                  | - apply/diff/explain        |
-                                  +-------------+---------------+
-                                                |
-                                                v
-                                  +-----------------------------+
-                                  | /services                   |
-                                  | - parser                    |
-                                  | - git service               |
-                                  | - AI adapter abstraction    |
-                                  +-------------+---------------+
-                                                |
-                                                v
-+------------------------+        +-----------------------------+
-| WhatsApp Cloud API     | <----- | Response Handler            |
-| (reply send API)       |        | - summary + files + diff    |
-+------------------------+        | - asks for APPLY approval   |
-                                  +-----------------------------+
+Telegram -> FastAPI /webhook on your laptop -> AI/Execution layer -> Telegram response
 ```
 
 ---
 
-## 2) Folder Structure
+## Features
+
+- Telegram Bot API integration with **webhook** (not polling).
+- FastAPI backend with modular routing:
+  - command handler: `/run`, `/status`, `/logs`
+  - natural language handler: free text -> AI/heuristic action decision
+- Local execution layer that can:
+  - run whitelisted shell commands
+  - list directories
+  - read files
+  - write files
+- Security guardrails:
+  - allowlist of shell commands
+  - blocked dangerous tokens
+  - allowed filesystem root
+  - only one authorized Telegram `chat_id`
+  - optional webhook secret validation
+- Async processing queue for incoming messages.
+- In-memory incoming/outgoing message logs.
+
+---
+
+## Project Structure
 
 ```text
 .
 ├── backend/
-│   ├── config.py
-│   ├── main.py
-│   └── schemas.py
+│   ├── config.py            # .env config loader
+│   ├── main.py              # FastAPI app + /webhook
+│   └── schemas.py           # response/message schemas
 ├── integrations/
-│   └── whatsapp_client.py
-├── repos/
-│   └── .gitkeep
+│   └── telegram_client.py   # Telegram sendMessage + setWebhook
 ├── runner/
-│   └── agent.py
+│   └── agent.py             # Agent decision execution logic
 ├── services/
 │   ├── ai/
 │   │   ├── base.py
+│   │   ├── openai_adapter.py
 │   │   └── stub.py
-│   ├── git_service.py
-│   ├── parser.py
-│   └── state.py
+│   ├── executor.py          # local shell/file executor
+│   ├── log_store.py         # recent message logs
+│   └── sanitizer.py         # command safety checks
+├── scripts/
+│   └── register_webhook.py  # refresh Telegram webhook after ngrok URL changes
 ├── .env.example
-├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 3) Functional Scope (MVP)
+## 1) Telegram Bot Setup
 
-- Receive incoming WhatsApp text messages through webhook.
-- Parse command + prompt + optional repo selector.
-- Supported commands:
-  - `explain` → explanation only
-  - `diff` → generate proposed changes + show diff + wait for approval
-  - `apply` → apply and commit pending changes
-- Maintain conversation history per user.
-- Use isolated workspace per repo.
-- Create feature branch per session: `feature/whatsapp-{session_id}`.
-- Never commit directly to `main`/`master`.
+1. Open Telegram and message **@BotFather**.
+2. Run `/newbot` and copy your bot token.
+3. Set this token in `.env` as `TELEGRAM_BOT_TOKEN`.
+4. Find your chat ID (send a message to bot first, then inspect incoming payload logs or use Telegram getUpdates temporarily).
+5. Put your chat ID in `.env` as `TELEGRAM_CHAT_ID`.
 
 ---
 
-## 4) Security / Guardrails
-
-- No arbitrary shell execution from WhatsApp prompts.
-- Repo path sanitization to prevent path traversal.
-- Writes happen only on explicit `APPLY` flow.
-- Commits blocked on `main` and `master`.
-- Responses are trimmed to WhatsApp limits.
-- Prompt/action history is logged and persisted (Redis or in-memory fallback).
-
----
-
-## 5) Requirements You Need
-
-## 5.1 Infrastructure / Accounts
-
-1. **Meta Developer account** with WhatsApp Cloud API access.
-2. **WhatsApp Business App** configured in Meta dashboard.
-3. **Webhook URL** reachable from internet (public HTTPS).
-   - For local development use tunnel tooling (e.g. ngrok or cloudflared).
-4. **Python 3.11+** (tested with Python 3.12).
-5. **Git** installed on host.
-6. **Redis (optional but recommended)** for state persistence.
-
-## 5.2 Environment Variables
-
-Create `.env` from `.env.example`:
+## 2) Configuration (.env)
 
 ```bash
 cp .env.example .env
 ```
 
-Set values:
+Required values:
 
-- `APP_ENV` → `dev` or `prod`
-- `REDIS_URL` → e.g. `redis://localhost:6379/0` (optional)
-- `WHATSAPP_VERIFY_TOKEN` → token used in Meta webhook verify step
-- `WHATSAPP_ACCESS_TOKEN` → permanent/system-user token for send API
-- `WHATSAPP_PHONE_NUMBER_ID` → phone number id from Meta dashboard
-- `DEFAULT_REPO` → fallback workspace repo name (e.g. `sample-repo`)
-- `REPOS_ROOT` → local workspace root (`./repos`)
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `OPENAI_API_KEY` (optional, fallback heuristic works without it)
+
+Also configurable:
+
+- `ALLOWED_COMMANDS`
+- `ALLOWED_ROOT`
+- `COMMAND_TIMEOUT_SECONDS`
+- `MAX_OUTPUT_CHARS`
+- `TELEGRAM_WEBHOOK_SECRET` (optional recommended)
 
 ---
 
-## 6) End-to-End Setup Process
-
-### Step 1: Install dependencies
+## 3) Run Locally
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### Step 2: Run Redis (optional)
-
-If using Docker:
-
-```bash
-docker run --name whatsapp-redis -p 6379:6379 -d redis:7
-```
-
-If Redis is unavailable, app will fallback to in-memory state.
-
-### Step 3: Start backend API
-
-```bash
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Step 4: Expose webhook publicly
+Health check:
 
-Example ngrok:
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+---
+
+## 4) Networking with ngrok + Webhook Registration
+
+Start ngrok:
 
 ```bash
 ngrok http 8000
 ```
 
-Use HTTPS URL from ngrok as webhook base.
-
-### Step 5: Configure WhatsApp webhook in Meta
-
-Set callback URL:
-
-```text
-https://<public-url>/webhook/whatsapp
-```
-
-Set verify token:
-
-```text
-<WHATSAPP_VERIFY_TOKEN>
-```
-
-Subscribe to `messages` webhook field.
-
-### Step 6: Send a test message
-
-To your configured WhatsApp number, send:
-
-```text
-diff repo=my-api Add a health endpoint to my FastAPI app
-```
-
-Expected behavior:
-
-1. System responds with summary + file list + diff preview.
-2. System asks: `Reply APPLY to commit changes.`
-3. Send `apply` to commit on feature branch.
-
----
-
-## 7) How Message Parsing Works
-
-Accepted patterns:
-
-- `explain <prompt>`
-- `diff <prompt>`
-- `apply`
-- `diff repo=my-repo <prompt>`
-- `explain repo=platform-api <prompt>`
-
-Rules:
-
-- If command missing, default is `explain`.
-- If `repo=` missing, `DEFAULT_REPO` is used.
-
----
-
-## 8) Runner Behavior
-
-For `diff`:
-
-1. Ensure workspace exists under `REPOS_ROOT`.
-2. Ensure branch `feature/whatsapp-{session_id}` exists and checkout.
-3. Request proposed changes from AI adapter.
-4. Build unified diff without writing files.
-5. Cache pending change for the user.
-6. Return structured response to WhatsApp.
-
-For `apply`:
-
-1. Load pending change for user.
-2. Write files to workspace.
-3. Commit changes with generated message.
-4. Return commit summary.
-
----
-
-## 9) AI Layer (Pluggable)
-
-Current MVP uses deterministic stub adapter in `services/ai/stub.py`.
-
-To integrate a real LLM/Copilot-like backend:
-
-1. Implement `AICoder` interface in `services/ai/base.py`.
-2. Replace `StubAICoder()` wiring in `backend/main.py`.
-3. Keep output contract: summary + file map content.
-
----
-
-## 10) API Endpoints
-
-- `GET /health` → service health check
-- `GET /webhook/whatsapp` → Meta verification
-- `POST /webhook/whatsapp` → inbound WhatsApp events
-
-### Verification Example
+Copy the HTTPS forwarding URL, then register webhook:
 
 ```bash
-curl "http://localhost:8000/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=change-me&hub.challenge=12345"
+python scripts/register_webhook.py --base-url https://<your-ngrok-url>
 ```
 
-Returns `12345` when token matches.
+This calls Telegram `setWebhook` for:
 
----
+```text
+https://<your-ngrok-url>/webhook
+```
 
-## 11) Operational Process for Production
+### Refresh webhook when ngrok URL changes
 
-1. Run API behind reverse proxy (Nginx/Caddy) with HTTPS.
-2. Use Redis (not in-memory) for durable conversation history.
-3. Use persistent storage for `REPOS_ROOT`.
-4. Run service as non-root user.
-5. Rotate WhatsApp access token securely (vault/secrets manager).
-6. Add monitoring:
-   - request logs
-   - task failures
-   - webhook delivery latency
-7. Backup repositories and logs.
-8. Add branch cleanup policy for old sessions.
-
----
-
-## 12) Troubleshooting
-
-### Webhook verify fails (403)
-
-- Ensure `WHATSAPP_VERIFY_TOKEN` in `.env` exactly matches Meta setting.
-
-### Messages received but no replies
-
-- Check `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID`.
-- Check app logs for `Task failed` output.
-
-### No persistent context
-
-- Ensure Redis is running and `REDIS_URL` is valid.
-
-### APPLY says no pending change
-
-- You must first run `diff ...` from same sender number.
-
----
-
-## 13) Quick Local Validation Commands
+Re-run the same command with the new URL:
 
 ```bash
-python -m compileall backend integrations runner services
-python - <<'PY'
-from backend.main import app
-print(app.title)
-PY
+python scripts/register_webhook.py --base-url https://<new-ngrok-url>
+```
+
+Optional direct curl (Telegram setWebhook):
+
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://<your-ngrok-url>/webhook"}'
 ```
 
 ---
 
-## 14) Current Limitations (MVP)
+## 5) Supported Commands in Telegram
 
-- Pending changes cached in-process; restart clears pending approval state.
-- AI provider is deterministic stub (not semantic coding model yet).
-- Single API process queue (no distributed worker yet).
+- `/status` -> returns server status
+- `/logs` -> returns recent incoming/outgoing message logs
+- `/run <command>` -> execute whitelisted shell command
+
+Natural language examples:
+
+- `list .`
+- `read README.md`
+- `write notes/todo.txt:::buy milk`
+- `run ls -la`
+
+If `OPENAI_API_KEY` is configured, free text is routed through OpenAI decision logic.
+Otherwise, heuristic parser handles common actions.
 
 ---
 
-## 15) Next Improvements
+## 6) Safety Model
 
-- Replace in-process queue with Celery/RQ/Arq.
-- Persist pending changes in Redis/postgres.
-- Add user auth + repo ACL (read vs write).
-- Multi-repo registry with git clone from remote origins.
-- Add Docker Compose and deployment scripts.
+- Unknown chat IDs are ignored.
+- Non-text/malformed updates are ignored without crashing.
+- Commands are allowed only if first token is in `ALLOWED_COMMANDS`.
+- Dangerous tokens are blocked (`rm`, `sudo`, etc.).
+- File operations are restricted to `ALLOWED_ROOT`.
+- Long outputs are truncated.
+
+---
+
+## 7) Example Telegram Interactions
+
+### /status
+
+User:
+
+```text
+/status
+```
+
+Bot:
+
+```text
+✅ Server is running and webhook is active.
+```
+
+### /run
+
+User:
+
+```text
+/run pwd
+```
+
+Bot (example):
+
+```text
+🧠 Executed:
+`pwd`
+
+/Users/you/projects/telegram-laptop-agent
+```
+
+### read file
+
+User:
+
+```text
+read README.md
+```
+
+Bot:
+
+```text
+📄 File content (README.md):
+<file contents...>
+```
+
+---
+
+## 8) Notes for VS Code / Local Machine Integration
+
+- This system executes directly on your host where FastAPI runs.
+- You can start/monitor it in VS Code terminal.
+- Keep `ALLOWED_COMMANDS` minimal and explicit for safety.
+

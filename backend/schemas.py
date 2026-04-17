@@ -1,21 +1,19 @@
+from __future__ import annotations
+
 from pydantic import BaseModel
 
 
-class ParsedMessage(BaseModel):
-    user_id: str
-    command: str
-    prompt: str
-    repo: str
-    session_id: str
+class TelegramMessage(BaseModel):
+    update_id: int
+    chat_id: int
+    from_id: int
+    text: str
 
 
-class RunnerResult(BaseModel):
-    summary: str
-    files_changed: list[str]
-    diff: str
-    requires_approval: bool = False
-    branch: str
+class ActionResult(BaseModel):
+    ok: bool
+    response_text: str
 
 
-class TaskEnvelope(BaseModel):
-    parsed: ParsedMessage
+class HealthResponse(BaseModel):
+    status: str

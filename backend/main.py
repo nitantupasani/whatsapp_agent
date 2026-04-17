@@ -4,58 +4,55 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, Request
 
 from backend.config import settings
-from backend.schemas import ParsedMessage
-from integrations.whatsapp_client import WhatsAppClient
-from runner.agent import RunnerAgent
-from services.ai.stub import StubAICoder
-from services.git_service import WorkspaceManager
-from services.parser import parse_user_message
-from services.state import ConversationState
+from integrations.telegram_client import TelegramClient
+from runner.agent import TelegramLaptopAgent
+from services.ai.openai_adapter import OpenAINLUAdapter
+from services.ai.stub import HeuristicNLUAdapter
+from services.executor import LocalExecutor
+from services.log_store import MessageLogStore
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("whatsapp-agent")
+logger = logging.getLogger("telegram-laptop-agent")
 
-app = FastAPI(title="WhatsApp Code Assistant")
-queue: asyncio.Queue[ParsedMessage] = asyncio.Queue()
+app = FastAPI(title="Telegram Laptop Agent")
+incoming_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
+logs = MessageLogStore()
 
-state = ConversationState(redis_url=settings.redis_url)
-whatsapp = WhatsAppClient(
-    access_token=settings.whatsapp_access_token,
-    phone_number_id=settings.whatsapp_phone_number_id,
+telegram = TelegramClient(bot_token=settings.telegram_bot_token)
+nlu = OpenAINLUAdapter(settings.openai_api_key, settings.openai_model) if settings.openai_api_key else HeuristicNLUAdapter()
+agent = TelegramLaptopAgent(
+    nlu=nlu,
+    executor=LocalExecutor(
+        allowed_root=settings.allowed_root,
+        timeout_seconds=settings.command_timeout_seconds,
+        max_output_chars=settings.max_output_chars,
+    ),
+    allowed_commands={cmd.strip() for cmd in settings.allowed_commands.split(",") if cmd.strip()},
 )
-agent = RunnerAgent(WorkspaceManager(settings.repos_root), StubAICoder())
 
 
 @app.on_event("startup")
-async def startup_event() -> None:
+async def startup() -> None:
     asyncio.create_task(worker())
 
 
 async def worker() -> None:
     while True:
-        parsed = await queue.get()
+        chat_id, text = await incoming_queue.get()
         try:
-            logger.info("Processing session=%s user=%s", parsed.session_id, parsed.user_id)
-            result = await agent.run(parsed)
-            await state.append(
-                parsed.user_id,
-                {
-                    "session_id": parsed.session_id,
-                    "command": parsed.command,
-                    "prompt": parsed.prompt,
-                    "summary": result.summary,
-                    "files_changed": result.files_changed,
-                },
-            )
-            await whatsapp.send_text(parsed.user_id, format_response(result.summary, result.files_changed, result.diff, result.requires_approval))
+            response = await dispatch_message(chat_id, text)
+            logs.add("out", chat_id, response)
+            await telegram.send_message(chat_id, response)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("task failed")
-            await whatsapp.send_text(parsed.user_id, f"Task failed: {exc}")
+            logger.exception("Failed to process message")
+            error_message = f"❌ Internal error: {exc}"
+            logs.add("out", chat_id, error_message)
+            await telegram.send_message(chat_id, error_message)
         finally:
-            queue.task_done()
+            incoming_queue.task_done()
 
 
 @app.get("/health")
@@ -63,55 +60,53 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/webhook/whatsapp")
-async def verify_webhook(
-    hub_mode: str = Query(alias="hub.mode"),
-    hub_verify_token: str = Query(alias="hub.verify_token"),
-    hub_challenge: str = Query(alias="hub.challenge"),
-) -> str:
-    if hub_mode == "subscribe" and hub_verify_token == settings.whatsapp_verify_token:
-        return hub_challenge
-    raise HTTPException(status_code=403, detail="verification failed")
+@app.post("/webhook")
+async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict[str, bool]:
+    if settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
+        logger.warning("Rejected webhook request: invalid secret token")
+        return {"ok": True}
 
-
-@app.post("/webhook/whatsapp")
-async def whatsapp_webhook(request: Request) -> dict[str, bool]:
     payload = await request.json()
-    for incoming in extract_incoming_messages(payload):
-        parsed = parse_user_message(incoming["from"], incoming["text"], settings.default_repo)
-        await queue.put(parsed)
+    extracted = extract_message(payload)
+    if not extracted:
+        return {"ok": True}
+
+    chat_id, from_id, text = extracted
+    logs.add("in", chat_id, text)
+
+    if chat_id != settings.telegram_chat_id:
+        logger.info("Ignoring unauthorized chat_id=%s", chat_id)
+        return {"ok": True}
+
+    await incoming_queue.put((chat_id, text))
     return {"ok": True}
 
 
-def extract_incoming_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
-    entries = payload.get("entry", [])
-    for entry in entries:
-        changes = entry.get("changes", [])
-        for change in changes:
-            value = change.get("value", {})
-            for message in value.get("messages", []):
-                if message.get("type") != "text":
-                    continue
-                text = message.get("text", {}).get("body", "")
-                sender = message.get("from")
-                if sender and text:
-                    messages.append({"from": sender, "text": text})
-    return messages
+def extract_message(payload: dict[str, Any]) -> tuple[int, int, str] | None:
+    message = payload.get("message") or payload.get("edited_message")
+    if not message:
+        return None
+
+    text = message.get("text")
+    chat = message.get("chat", {})
+    sender = message.get("from", {})
+    if not isinstance(text, str) or "id" not in chat or "id" not in sender:
+        return None
+
+    return int(chat["id"]), int(sender["id"]), text.strip()
 
 
-def format_response(summary: str, files_changed: list[str], diff_text: str, requires_approval: bool) -> str:
-    lines = [f"Summary: {summary}"]
-    if files_changed:
-        lines.append("Files changed:")
-        lines.extend([f"- {f}" for f in files_changed])
+async def dispatch_message(chat_id: int, text: str) -> str:
+    if text.startswith("/status"):
+        return "✅ Server is running and webhook is active."
 
-    if diff_text:
-        clipped = diff_text[:1500]
-        lines.append("Diff preview:")
-        lines.append(clipped)
+    if text.startswith("/logs"):
+        return logs.tail(15)
 
-    if requires_approval:
-        lines.append("Reply APPLY to commit changes.")
+    if text.startswith("/run"):
+        command = text[4:].strip()
+        if not command:
+            return "Usage: /run <command>"
+        return await agent.handle_text(f"run {command}")
 
-    return "\n".join(lines)
+    return await agent.handle_text(text)
